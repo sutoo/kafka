@@ -36,7 +36,6 @@ Port = collections.namedtuple('Port', ['name', 'number', 'open'])
 
 
 class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
-
     PERSISTENT_ROOT = "/mnt/kafka"
     STDOUT_STDERR_CAPTURE = os.path.join(PERSISTENT_ROOT, "server-start-stdout-stderr.log")
     LOG4J_CONFIG = os.path.join(PERSISTENT_ROOT, "kafka-log4j.properties")
@@ -104,9 +103,9 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
         # is authenticating and waiting for the SaslAuthenticated
         # in addition to the SyncConnected event.
         #
-        # The defaut value for zookeeper.connect.timeout.ms is
+        # The default value for zookeeper.connect.timeout.ms is
         # 2 seconds and here we increase it to 5 seconds, but
-        # it can be overriden by setting the corresponding parameter
+        # it can be overridden by setting the corresponding parameter
         # for this constructor.
         self.zk_connect_timeout = zk_connect_timeout
 
@@ -165,6 +164,15 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
 
         self.start_minikdc(add_principals)
         Service.start(self)
+
+        self.logger.info("Waiting for brokers to register at ZK")
+
+        retries = 30
+        expected_broker_ids = set(self.nodes)
+        wait_until(lambda: {node for node in self.nodes if self.is_registered(node)} == expected_broker_ids, 30, 1)
+
+        if retries == 0:
+            raise RuntimeError("Kafka servers didn't register at ZK within 30 seconds")
 
         # Create topics if necessary
         if self.topics is not None:
@@ -230,7 +238,8 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
         self.logger.debug("Attempting to start KafkaService on %s with command: %s" % (str(node.account), cmd))
         with node.account.monitor_log(KafkaService.STDOUT_STDERR_CAPTURE) as monitor:
             node.account.ssh(cmd)
-            monitor.wait_until("Kafka Server.*started", timeout_sec=30, backoff_sec=.25, err_msg="Kafka server didn't finish startup")
+            # Kafka 1.0.0 and higher don't have a space between "Kafka" and "Server"
+            monitor.wait_until("Kafka\s*Server.*started", timeout_sec=30, backoff_sec=.25, err_msg="Kafka server didn't finish startup")
 
         # Credentials for inter-broker communication are created before starting Kafka.
         # Client credentials are created after starting Kafka so that both loading of
@@ -239,12 +248,12 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
 
         self.start_jmx_tool(self.idx(node), node)
         if len(self.pids(node)) == 0:
-            raise Exception("No process ids recorded on node %s" % str(node))
+            raise Exception("No process ids recorded on node %s" % node.account.hostname)
 
     def pids(self, node):
         """Return process ids associated with running processes on the given node."""
         try:
-            cmd = "jcmd | grep -e kafka.Kafka | awk '{print $1}'"
+            cmd = "jcmd | grep -e %s | awk '{print $1}'" % self.java_class_name()
             pid_arr = [pid for pid in node.account.ssh_capture(cmd, allow_fail=True, callback=int)]
             return pid_arr
         except (RemoteCommandError, ValueError) as e:
@@ -270,7 +279,8 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
     def clean_node(self, node):
         JmxMixin.clean_node(self, node)
         self.security_config.clean_node(node)
-        node.account.kill_process("kafka", clean_shutdown=False, allow_fail=True)
+        node.account.kill_java_processes(self.java_class_name(),
+                                         clean_shutdown=False, allow_fail=True)
         node.account.ssh("sudo rm -rf -- %s" % KafkaService.PERSISTENT_ROOT, allow_fail=False)
 
     def create_topic(self, topic_cfg, node=None):
@@ -656,3 +666,6 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
             output += line
         self.logger.debug(output)
         return output
+
+    def java_class_name(self):
+        return "kafka.Kafka"

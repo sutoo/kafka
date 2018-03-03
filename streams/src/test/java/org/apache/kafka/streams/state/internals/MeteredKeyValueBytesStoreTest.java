@@ -128,7 +128,6 @@ public class MeteredKeyValueBytesStoreTest {
     }
 
     private KafkaMetric metric(final String name) {
-        Map<MetricName, KafkaMetric> metrics = this.metrics.metrics();
         return this.metrics.metric(new MetricName(name, "stream-scope-metrics", "", this.tags));
     }
 
@@ -193,6 +192,20 @@ public class MeteredKeyValueBytesStoreTest {
         assertTrue(metric.value() > 0);
         EasyMock.verify(inner);
     }
+
+    @Test
+    public void shouldFlushInnerWhenFlushTimeRecords() {
+        inner.flush();
+        EasyMock.expectLastCall().once();
+        init();
+
+        metered.flush();
+
+        final KafkaMetric metric = metric("flush-rate");
+        assertTrue(metric.value() > 0);
+        EasyMock.verify(inner);
+    }
+
 
     private KafkaMetric metric(final MetricName metricName) {
         return this.metrics.metric(metricName);

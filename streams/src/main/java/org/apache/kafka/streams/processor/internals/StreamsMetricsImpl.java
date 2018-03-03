@@ -24,7 +24,7 @@ import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
 import org.apache.kafka.common.metrics.stats.Count;
 import org.apache.kafka.common.metrics.stats.Max;
-import org.apache.kafka.common.metrics.stats.Rate;
+import org.apache.kafka.common.metrics.stats.Meter;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.streams.StreamsMetrics;
 import org.slf4j.Logger;
@@ -112,7 +112,7 @@ public class StreamsMetricsImpl implements StreamsMetrics {
 
 
     private Map<String, String> constructTags(final String scopeName, final String entityName, final String... tags) {
-        List<String> updatedTagList = new ArrayList(Arrays.asList(tags));
+        List<String> updatedTagList = new ArrayList<>(Arrays.asList(tags));
         updatedTagList.add(scopeName + "-id");
         updatedTagList.add(entityName);
         return tagMap(updatedTagList.toArray(new String[updatedTagList.size()]));
@@ -129,11 +129,11 @@ public class StreamsMetricsImpl implements StreamsMetrics {
 
         // first add the global operation metrics if not yet, with the global tags only
         Sensor parent = metrics.sensor(sensorName(operationName, null), recordingLevel);
-        addLatencyMetrics(scopeName, parent, operationName, allTagMap);
+        addLatencyAndThroughputMetrics(scopeName, parent, operationName, allTagMap);
 
         // add the operation metrics with additional tags
         Sensor sensor = metrics.sensor(sensorName(operationName, entityName), recordingLevel, parent);
-        addLatencyMetrics(scopeName, sensor, operationName, tagMap);
+        addLatencyAndThroughputMetrics(scopeName, sensor, operationName, tagMap);
 
         parentSensors.put(sensor, parent);
 
@@ -161,7 +161,7 @@ public class StreamsMetricsImpl implements StreamsMetrics {
         return sensor;
     }
 
-    private void addLatencyMetrics(String scopeName, Sensor sensor, String opName, Map<String, String> tags) {
+    private void addLatencyAndThroughputMetrics(String scopeName, Sensor sensor, String opName, Map<String, String> tags) {
 
         maybeAddMetric(sensor, metrics.metricName(opName + "-latency-avg", groupNameFromScope(scopeName),
             "The average latency of " + opName + " operation.", tags), new Avg());
@@ -171,8 +171,15 @@ public class StreamsMetricsImpl implements StreamsMetrics {
     }
 
     private void addThroughputMetrics(String scopeName, Sensor sensor, String opName, Map<String, String> tags) {
-        maybeAddMetric(sensor, metrics.metricName(opName + "-rate", groupNameFromScope(scopeName),
-            "The average number of occurrence of " + opName + " operation per second.", tags), new Rate(new Count()));
+        MetricName rateMetricName = metrics.metricName(opName + "-rate", groupNameFromScope(scopeName),
+            "The average number of occurrence of " + opName + " operation per second.", tags);
+        MetricName totalMetricName = metrics.metricName(opName + "-total", groupNameFromScope(scopeName),
+                "The total number of occurrence of " + opName + " operations.", tags);
+        if (!metrics.metrics().containsKey(rateMetricName) && !metrics.metrics().containsKey(totalMetricName)) {
+            sensor.add(new Meter(new Count(), rateMetricName, totalMetricName));
+        } else {
+            log.trace("Trying to add metric twice: {} {}", rateMetricName, totalMetricName);
+        }
     }
 
     public void maybeAddMetric(Sensor sensor, MetricName name, MeasurableStat stat) {
@@ -209,11 +216,10 @@ public class StreamsMetricsImpl implements StreamsMetrics {
      */
     @Override
     public void removeSensor(Sensor sensor) {
-        Sensor parent = null;
         Objects.requireNonNull(sensor, "Sensor is null");
-
         metrics.removeSensor(sensor.name());
-        parent = parentSensors.get(sensor);
+
+        final Sensor parent = parentSensors.get(sensor);
         if (parent != null) {
             metrics.removeSensor(parent.name());
         }
